@@ -128,6 +128,12 @@ def create_training_wrapper_from_config(model_config, model):
             ema_copy=ema_copy,
             lr=training_config["learning_rate"]
         )
+    elif model_type == 'latent_diffusion_uncond':
+        from .diffusion import LatentDiffusionUncondTrainingWrapper
+        return LatentDiffusionUncondTrainingWrapper(
+            model,
+            lr=training_config["learning_rate"],
+        )
     else:
         raise NotImplementedError(f'Unknown model type: {model_type}')
 
@@ -208,6 +214,13 @@ def create_demo_callback_from_config(model_config, **kwargs):
             demo_cfg_scales=demo_config["demo_cfg_scales"],
             demo_conditioning=demo_config["demo_cond"],
             **kwargs
+        )
+    elif model_type == 'latent_diffusion_uncond':
+        from .diffusion import LatentDiffusionUncondDemoCallback
+        return LatentDiffusionUncondDemoCallback(
+            demo_every=demo_config.get("demo_every", 2000),
+            demo_steps=demo_config.get("demo_steps", 250),
+            sample_rate=model_config["sample_rate"]
         )
     else:
         raise NotImplementedError(f'Unknown model type: {model_type}')

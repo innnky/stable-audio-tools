@@ -5,7 +5,7 @@ import logging, warnings
 import string
 import typing as tp
 import gc
-from laion_clap.clap_module.factory import load_state_dict as clap_load_state_dict
+# from laion_clap.clap_module.factory import load_state_dict as clap_load_state_dict
 
 from .adp import NumberEmbedder
 from ..inference.utils import set_audio_channels

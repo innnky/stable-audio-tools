@@ -16,7 +16,7 @@ from torch.backends.cuda import sdp_kernel
 from torch.nn import functional as F
 from dac.nn.layers import Snake1d
 
-from audiocraft.modules.conv import get_extra_padding_for_conv1d, pad1d, unpad1d
+# from audiocraft.modules.conv import get_extra_padding_for_conv1d, pad1d, unpad1d
 
 """
 Utils
