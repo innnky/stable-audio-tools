@@ -20,7 +20,10 @@ def create_model_from_config(model_config):
     elif model_type == 'musicgen':
         from .musicgen import create_musicgen_from_config
         return create_musicgen_from_config(model_config)
-    elif model_type == 'latent_diffusion_uncond':
+    elif model_type in [
+        'latent_diffusion_uncond',
+        'latent_diffusion_contentvec'
+    ]:
         from .diffusion import create_diffusion_uncond_from_config
         return create_diffusion_uncond_from_config(model_config)
     else:
