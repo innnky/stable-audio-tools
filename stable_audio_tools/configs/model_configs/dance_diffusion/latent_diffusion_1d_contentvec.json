@@ -16,7 +16,7 @@
     "training": {
         "learning_rate": 4e-5,
         "demo": {
-            "demo_every": 1000,
+            "demo_every": 5000,
             "demo_steps": 250
         }
     }

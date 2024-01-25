@@ -90,7 +90,7 @@ class LatentDiffusionContentvecTrainingWrapper(pl.LightningModule):
         with torch.no_grad():
             latent = vaegan.encode_from_wav44k_tensor(wav441)
             wav16k = resample(wav441)
-            content = contentvec(wav16k)["last_hidden_state"].transpose(1, 2)
+            content = contentvec(wav16k.squeeze(1))["last_hidden_state"].transpose(1, 2)
 
         cond = self.cond_proj(content)
         reals = latent
@@ -188,7 +188,7 @@ class LatentDiffusionContentvecDemoCallback(pl.Callback):
         with torch.no_grad():
             latent = vaegan.encode_from_wav44k_tensor(wav441)
             wav16k = resample(wav441)
-            content = contentvec(wav16k)["last_hidden_state"].transpose(1, 2)
+            content = contentvec(wav16k.squeeze(1))["last_hidden_state"].transpose(1, 2)
 
         cond = module.cond_proj(content)
         reals = latent
