@@ -205,7 +205,7 @@ class DAV(nn.Module):
         mel_dim = 128
 
         self.mel_proj = nn.Conv1d(vae_latent_channels, mel_dim, 3, padding=1)
-        self.norm_ratio = 3
+        self.norm_ratio = 1.5
 
         self.mean_proj = nn.Conv1d(latent_dim, vae_latent_channels, 1)
         self.logs_proj = nn.Conv1d(latent_dim, vae_latent_channels, 1)
