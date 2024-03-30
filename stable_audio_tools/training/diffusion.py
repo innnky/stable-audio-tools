@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import sys, gc
 import random
@@ -14,6 +15,7 @@ from safetensors.torch import save_file
 from torch import optim
 from torch.nn import functional as F
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from transformers import HubertModel
 
 from ..inference.sampling import get_alphas_sigmas, sample
 from ..models.diffusion import DiffusionModelWrapper, ConditionedDiffusionModelWrapper
@@ -24,6 +26,9 @@ from .utils import create_optimizer_from_config, create_scheduler_from_config
 
 from time import time
 
+from ..models.mel_style_encoder import MelStyleEncoder
+from ..models.quantize import ResidualVectorQuantizer
+
 on_the_fly_models = None
 
 def get_on_the_fly_models(device, dtype, model_loader):
@@ -33,6 +38,213 @@ def get_on_the_fly_models(device, dtype, model_loader):
         models = [model.to(device).to(dtype) for model in models]
         on_the_fly_models = models
     return on_the_fly_models
+
+class LatentDiffVQRefTrainingWrapper(pl.LightningModule):
+    '''
+    Wrapper for training an conditional audio diffusion model
+    '''
+
+    def __init__(
+            self,
+            model: DiffusionModelWrapper,
+            lr: float = 1e-4
+    ):
+        super().__init__()
+
+        self.diffusion = model
+
+        self.diffusion_ema = EMA(
+            self.diffusion.model,
+            beta=0.9999,
+            power=3 / 4,
+            update_every=1,
+            update_after_step=1
+        )
+
+        self.lr = lr
+
+        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+
+        loss_modules = [
+            MSELoss("v",
+                    "targets",
+                    weight=1.0,
+                    name="mse_loss"
+                    )
+        ]
+        self.ssl_proj = torch.nn.Conv1d(768, 192, kernel_size=3, padding=1, stride=2)
+        self.quantizer = ResidualVectorQuantizer(
+            dimension=192,
+            n_q=1,
+            bins=1024
+        )
+        self.reference_encoder = MelStyleEncoder(64, style_vector_dim=192)
+        self.losses = MultiLoss(loss_modules)
+
+    def load_on_the_fly_models(self):
+        from vaegan.DAV import load_model
+        import transformers
+        vae = load_model('pretrain/dav.pth', 'cpu')
+        contentvec = HubertModel.from_pretrained("TencentGameMate/chinese-hubert-base")
+        resample = torchaudio.transforms.Resample(44100, 16000)
+        return [vae, contentvec, resample]
+
+    def configure_optimizers(self):
+        return optim.Adam([*self.diffusion.parameters()], lr=self.lr)
+
+    def training_step(self, batch, batch_idx):
+        wav441 = batch[0]
+        on_the_fly_models = get_on_the_fly_models(wav441.device, wav441.dtype, self.load_on_the_fly_models)
+        vaegan, contentvec, resample = on_the_fly_models
+
+        with torch.no_grad():
+            latent = vaegan.encode_from_wav44k_tensor(wav441)
+            wav16k = resample(wav441)
+            content = contentvec(wav16k.squeeze(1))["last_hidden_state"].transpose(1, 2)
+
+        ssl = self.ssl_proj(content)
+        quantized, codes, commit_loss, quantized_list = self.quantizer(ssl, layers=[0]) #bs, 192, l
+        ge = self.reference_encoder(latent) # bs, 192, 1
+        ge = ge.repeat(1, 1, quantized.shape[-1])
+        cond = torch.cat([quantized, ge], 1)
+        reals = latent
+
+        # with torch.n
+        if reals.ndim == 4 and reals.shape[0] == 1:
+            reals = reals[0]
+
+        # Draw uniformly distributed continuous timesteps
+        t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
+
+        # Calculate the noise schedule parameters for those timesteps
+        alphas, sigmas = get_alphas_sigmas(t)
+
+        diffusion_input = reals
+
+        loss_info = {}
+
+        loss_info["audio_reals"] = diffusion_input
+
+        if self.diffusion.pretransform is not None:
+            with torch.set_grad_enabled(self.diffusion.pretransform.enable_grad):
+                diffusion_input = self.diffusion.pretransform.encode(diffusion_input)
+                loss_info["reals"] = diffusion_input
+
+        # Combine the ground truth data and the noise
+        alphas = alphas[:, None, None]
+        sigmas = sigmas[:, None, None]
+        noise = torch.randn_like(diffusion_input)
+        noised_inputs = diffusion_input * alphas + noise * sigmas
+        targets = noise * alphas - diffusion_input * sigmas
+
+        with torch.cuda.amp.autocast():
+            v = self.diffusion(noised_inputs, t, cond=cond)
+
+            loss_info.update({
+                "v": v,
+                "targets": targets
+            })
+
+            diff_loss, losses = self.losses(loss_info)
+        loss = diff_loss + commit_loss * 0.25
+        log_dict = {
+            'train/loss': loss.detach(),
+            'train/std_data': diffusion_input.std(),
+        }
+
+        for loss_name, loss_value in losses.items():
+            log_dict[f"train/{loss_name}"] = loss_value.detach()
+        log_dict["train/commit_loss"] = commit_loss
+        log_dict["train/diff_loss"] = diff_loss
+        self.log_dict(log_dict, prog_bar=True, on_step=True)
+        return loss
+
+    def on_before_zero_grad(self, *args, **kwargs):
+        self.diffusion_ema.update()
+
+    def export_model(self, path, use_safetensors=False):
+
+        self.diffusion.model = self.diffusion_ema.ema_model
+
+        if use_safetensors:
+            save_file(self.diffusion.state_dict(), path)
+        else:
+            torch.save({"state_dict": self.diffusion.state_dict()}, path)
+
+
+class LatentDiffVQRefDemoCallback(pl.Callback):
+    def __init__(self,
+                 demo_every=2000,
+                 num_demos=8,
+                 demo_steps=250,
+                 sample_rate=48000
+                 ):
+        super().__init__()
+
+        self.demo_every = demo_every
+        self.num_demos = num_demos
+        self.demo_steps = demo_steps
+        self.sample_rate = sample_rate
+        self.last_demo_step = -1
+
+    @rank_zero_only
+    @torch.no_grad()
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):
+
+        if (trainer.global_step - 1) % self.demo_every != 0 or self.last_demo_step == trainer.global_step:
+            return
+
+        self.last_demo_step = trainer.global_step
+        module.eval()
+        wav441 = batch[0]
+        on_the_fly_models = get_on_the_fly_models(wav441.device, wav441.dtype, module.load_on_the_fly_models)
+        vaegan, contentvec, resample = on_the_fly_models
+
+        with torch.no_grad():
+            latent = vaegan.encode_from_wav44k_tensor(wav441)
+            wav16k = resample(wav441)
+            content = contentvec(wav16k.squeeze(1))["last_hidden_state"].transpose(1, 2)
+
+        ssl = module.ssl_proj(content)
+        quantized, codes, commit_loss, quantized_list = module.quantizer(ssl, layers=[0])  # bs, 192, l
+        ge = module.reference_encoder(latent)  # bs, 192, 1
+        ge = ge.repeat(1, 1, quantized.shape[-1])
+        cond = torch.cat([quantized, ge], 1)
+        reals = latent
+        noise = torch.randn_like(reals).to(module.device)
+
+        with torch.cuda.amp.autocast():
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0, cond=cond)
+
+            if module.diffusion.pretransform is not None:
+                fakes = module.diffusion.pretransform.decode(fakes)
+
+        audio_gen = vaegan.decode_to_wav44k_tensor(fakes)
+        audio_rec = vaegan.decode_to_wav44k_tensor(reals)
+        log_dict = {}
+        for i in range(fakes.shape[0]):
+            import soundfile
+
+            gen_filename = f'demo_{i}.wav'
+            rec_filename = f'rec_{i}.wav'
+            soundfile.write(gen_filename, audio_gen[i, 0, :].cpu().numpy(), 44100)
+            soundfile.write(rec_filename, audio_rec[i, 0, :].cpu().numpy(), 44100)
+            log_dict[f'sample_{i}'] = [
+                wandb.Audio(gen_filename, sample_rate=self.sample_rate, caption=f'gen'),
+                wandb.Audio(rec_filename, sample_rate=self.sample_rate, caption=f'rec')
+            ]
+        quantized_path = 'quantized.jpg'
+        plt.imshow(quantized[0].cpu().numpy())
+        plt.savefig(quantized_path)
+
+        log_dict[f'quantized'] = wandb.Image(quantized_path)
+
+        trainer.logger.experiment.log(log_dict)
+
+        del fakes
+        gc.collect()
+        torch.cuda.empty_cache()
+        module.train()
 
 
 class LatentDiffusionContentvecTrainingWrapper(pl.LightningModule):

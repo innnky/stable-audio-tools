@@ -154,6 +154,12 @@ def create_training_wrapper_from_config(model_config, model):
             model,
             lr=training_config["learning_rate"],
         )
+    elif model_type == 'latent_diffvq_contentvec_ref':
+        from .diffusion import LatentDiffVQRefTrainingWrapper
+        return LatentDiffVQRefTrainingWrapper(
+            model,
+            lr=training_config["learning_rate"],
+        )
     else:
         raise NotImplementedError(f'Unknown model type: {model_type}')
 
@@ -245,6 +251,13 @@ def create_demo_callback_from_config(model_config, **kwargs):
     elif model_type == 'latent_diffusion_contentvec':
         from .diffusion import LatentDiffusionContentvecDemoCallback
         return LatentDiffusionContentvecDemoCallback(
+            demo_every=demo_config.get("demo_every", 2000),
+            demo_steps=demo_config.get("demo_steps", 250),
+            sample_rate=model_config["sample_rate"]
+        )
+    elif model_type == 'latent_diffvq_contentvec_ref':
+        from .diffusion import LatentDiffVQRefDemoCallback
+        return LatentDiffVQRefDemoCallback(
             demo_every=demo_config.get("demo_every", 2000),
             demo_steps=demo_config.get("demo_steps", 250),
             sample_rate=model_config["sample_rate"]
