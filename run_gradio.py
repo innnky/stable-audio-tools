@@ -3,6 +3,7 @@ from stable_audio_tools.interface.gradio import create_ui
 import json 
 
 import torch
+from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 
 def main(args):
     torch.manual_seed(42)

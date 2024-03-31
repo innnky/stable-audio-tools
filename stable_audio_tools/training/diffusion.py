@@ -78,7 +78,7 @@ class LatentDiffVQRefTrainingWrapper(pl.LightningModule):
             n_q=1,
             bins=1024
         )
-        self.reference_encoder = MelStyleEncoder(64, style_vector_dim=192)
+        self.reference_encoder = MelStyleEncoder(256, style_vector_dim=192)
         self.losses = MultiLoss(loss_modules)
 
     def load_on_the_fly_models(self):
@@ -99,14 +99,16 @@ class LatentDiffVQRefTrainingWrapper(pl.LightningModule):
 
         with torch.no_grad():
             latent = vaegan.encode_from_wav44k_tensor(wav441)
+            bs, ch, l = latent.shape
+            latent = latent.transpose(1, 2).reshape(bs, l//4, ch*4).transpose(1, 2)
             wav16k = resample(wav441)
             content = contentvec(wav16k.squeeze(1))["last_hidden_state"].transpose(1, 2)
 
         ssl = self.ssl_proj(content)
+        ssl = F.interpolate(ssl, size=l//4, mode='linear')
         quantized, codes, commit_loss, quantized_list = self.quantizer(ssl, layers=[0]) #bs, 192, l
-        ge = self.reference_encoder(latent) # bs, 192, 1
-        ge = ge.repeat(1, 1, quantized.shape[-1])
-        cond = torch.cat([quantized, ge], 1)
+        ge = self.reference_encoder(latent).squeeze(-1) # bs, 192
+        cond = quantized
         reals = latent
 
         # with torch.n
@@ -138,7 +140,7 @@ class LatentDiffVQRefTrainingWrapper(pl.LightningModule):
         targets = noise * alphas - diffusion_input * sigmas
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_inputs, t, cond=cond)
+            v = self.diffusion(noised_inputs, t, input_concat_cond=cond, global_embed=ge)
 
             loss_info.update({
                 "v": v,
@@ -202,23 +204,27 @@ class LatentDiffVQRefDemoCallback(pl.Callback):
 
         with torch.no_grad():
             latent = vaegan.encode_from_wav44k_tensor(wav441)
+            bs, ch, l = latent.shape
+            latent = latent.transpose(1, 2).reshape(bs, l//4, ch*4).transpose(1, 2)
             wav16k = resample(wav441)
             content = contentvec(wav16k.squeeze(1))["last_hidden_state"].transpose(1, 2)
 
         ssl = module.ssl_proj(content)
+        ssl = F.interpolate(ssl, size=l//4, mode='linear')
         quantized, codes, commit_loss, quantized_list = module.quantizer(ssl, layers=[0])  # bs, 192, l
-        ge = module.reference_encoder(latent)  # bs, 192, 1
-        ge = ge.repeat(1, 1, quantized.shape[-1])
-        cond = torch.cat([quantized, ge], 1)
+        ge = module.reference_encoder(latent).squeeze(-1) # bs, 192
+        cond = quantized
         reals = latent
         noise = torch.randn_like(reals).to(module.device)
 
         with torch.cuda.amp.autocast():
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0, cond=cond)
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0, input_concat_cond=cond, global_embed=ge)
 
             if module.diffusion.pretransform is not None:
                 fakes = module.diffusion.pretransform.decode(fakes)
 
+        fakes = fakes.transpose(1, 2).reshape(bs, l, ch).transpose(1, 2)
+        reals = reals.transpose(1, 2).reshape(bs, l, ch).transpose(1, 2)
         audio_gen = vaegan.decode_to_wav44k_tensor(fakes)
         audio_rec = vaegan.decode_to_wav44k_tensor(reals)
         log_dict = {}

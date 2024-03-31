@@ -4,19 +4,12 @@
     "sample_rate": 44100,
     "audio_channels": 1,
     "model": {
-        "type": "DAU1d",
-        "config": {
-            "n_attn_layers": 6,
-            "channels": [256, 256, 512, 512, 512, 512, 512, 512],
-            "depth": 8,
-            "io_channels": 64,
-            "cond_dim": 384
-        }
+        "type": "dit"
     },
     "training": {
-        "learning_rate": 4e-5,
+        "learning_rate": 1e-4,
         "demo": {
-            "demo_every": 2000,
+            "demo_every": 1000,
             "demo_steps": 50
         }
     }

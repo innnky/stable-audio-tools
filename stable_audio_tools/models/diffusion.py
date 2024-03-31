@@ -570,7 +570,14 @@ def create_diffusion_uncond_from_config(config: tp.Dict[str, tp.Any]):
         )
     elif model_type == "dit":
         model = DiTUncondWrapper(
-            **diffusion_config
+            in_channels=256,
+            global_cond_dim=192,
+            input_concat_dim=192,
+
+            input_length=2048,
+            embed_dim=768,
+            depth=12,
+            num_heads=8
         )
 
     else:
