@@ -108,6 +108,8 @@ def get_audio_filenames(
         filenames.extend(files)
     return filenames
 
+torchaudio.set_audio_backend("soundfile")
+
 class SampleDataset(torch.utils.data.Dataset):
     def __init__(
         self, 
@@ -143,18 +145,31 @@ class SampleDataset(torch.utils.data.Dataset):
 
         self.sr = sample_rate
 
+        self.target_duration = sample_size / sample_rate
+
         self.custom_metadata_fn = custom_metadata_fn
 
     def load_file(self, filename):
         ext = filename.split(".")[-1]
 
-        if ext == "mp3":
-            with AudioFile(filename) as f:
-                audio = f.read(f.frames)
-                audio = torch.from_numpy(audio)
-                in_sr = f.samplerate
+        info = torchaudio.info(filename)
+        total_duration = info.num_frames / info.sample_rate
+        target_duration = self.target_duration + 0.1
+        if target_duration >= total_duration:
+            print(f"File {filename} is too short")
+            audio, in_sr = torchaudio.load(filename)
         else:
-            audio, in_sr = torchaudio.load(filename, format=ext)
+            start_time = random.uniform(0, total_duration - target_duration)
+            start_sample = int(start_time * info.sample_rate)
+            audio, in_sr  = torchaudio.load(filename, frame_offset=start_sample,
+                                                    num_frames=int(target_duration * info.sample_rate))
+        # if ext == "mp3":
+        #     with AudioFile(filename) as f:
+        #         audio = f.read(f.frames)
+        #         audio = torch.from_numpy(audio)
+        #         in_sr = f.samplerate
+        # else:
+        #     audio, in_sr = torchaudio.load(filename, format=ext)
 
         if in_sr != self.sr:
             resample_tf = T.Resample(in_sr, self.sr)
